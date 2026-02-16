@@ -14,7 +14,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom CSS เพื่อปรับแต่งปุ่มให้ดูเหมือน Trading Platform
+# Custom CSS
 st.markdown("""
 <style>
     .stButton>button {
@@ -22,7 +22,7 @@ st.markdown("""
         border-radius: 8px;
         font-weight: bold;
     }
-    /* ปรับแต่งปุ่ม Pills ให้ดูดี */
+    /* ปรับแต่งปุ่ม Pills ให้สวยงาม */
     div[data-testid="stPills"] {
         gap: 10px;
         justify-content: center;
@@ -35,7 +35,7 @@ st.markdown("""
 # ---------------------------------------------------------
 @st.cache_data(ttl=86400)
 def get_sp500_tickers():
-    """ดูดรายชื่อหุ้น S&P 500 ทั้งหมดจาก Wikipedia อัตโนมัติ"""
+    """ดูดรายชื่อหุ้น S&P 500 ทั้งหมดจาก Wikipedia"""
     try:
         url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
         tables = pd.read_html(url)
@@ -46,7 +46,7 @@ def get_sp500_tickers():
         return {
             "AAPL": "Apple Inc.", "TSLA": "Tesla, Inc.", "NVDA": "NVIDIA Corp.",
             "AMD": "Advanced Micro Devices", "MSFT": "Microsoft Corp.",
-            "GOOGL": "Alphabet Inc.", "AMZN": "Amazon.com", "META": "Meta Platforms"
+            "GOOGL": "Alphabet Inc."
         }
 
 SP500_TICKERS = get_sp500_tickers()
@@ -66,7 +66,6 @@ if 'news_cache' not in st.session_state:
 # ---------------------------------------------------------
 def get_stock_data(symbol, interval):
     """ดึงข้อมูลราคา + ปรับ Period อัตโนมัติ"""
-    # Mapping ให้ฉลาดขึ้นตาม Interval ที่เลือก
     period_map = {
         "1m": "1d", "5m": "5d", "15m": "1mo", 
         "30m": "1mo", "1h": "3mo", "1d": "1y", "1wk": "2y", "1mo": "5y"
@@ -152,7 +151,6 @@ with st.sidebar:
     with tab1:
         sp500_options = [f"{sym} - {name}" for sym, name in SP500_TICKERS.items()]
         selected_sp500 = st.selectbox("เลือกหุ้น S&P 500:", [""] + sp500_options)
-        
         if selected_sp500:
             ticker = selected_sp500.split(" - ")[0]
             if st.button(f"➕ เพิ่ม {ticker}"):
@@ -163,14 +161,23 @@ with st.sidebar:
     with tab2:
         custom_ticker = st.text_input("พิมพ์ชื่อย่อหุ้น (เช่น PLTR, COIN):").upper()
         if st.button("➕ เพิ่มหุ้น Custom"):
-            if custom_ticker and custom_ticker not in st.session_state.watchlist:
-                check = yf.Ticker(custom_ticker)
-                try:
-                    if check.info:
-                        st.session_state.watchlist.append(custom_ticker)
-                        st.rerun()
-                except:
-                    st.error("❌ ไม่พบข้อมูลหุ้นนี้")
+            if custom_ticker:
+                if custom_ticker in st.session_state.watchlist:
+                    st.warning(f"หุ้น {custom_ticker} มีในรายการอยู่แล้ว")
+                else:
+                    # --- FIX: แก้ไขวิธีเช็คหุ้นตรงนี้ ---
+                    with st.spinner(f"กำลังตรวจสอบ {custom_ticker}..."):
+                        check_stock = yf.Ticker(custom_ticker)
+                        # ใช้ .history(period="1d") แทน .info เพราะเร็วกว่าและชัวร์กว่า
+                        check_hist = check_stock.history(period="1d")
+                        
+                        if not check_hist.empty:
+                            st.session_state.watchlist.append(custom_ticker)
+                            st.rerun()
+                        else:
+                            st.error(f"❌ ไม่พบข้อมูลหุ้น: {custom_ticker} (อาจเป็นหุ้นที่ Delist หรือพิมพ์ผิด)")
+            else:
+                st.warning("กรุณาพิมพ์ชื่อหุ้นก่อน")
 
     st.divider()
     
@@ -202,18 +209,22 @@ if target_stock:
 
     with st.spinner(f"Fetching {target_stock} data..."):
         try:
-            # --- ส่วน Metrics (ราคา) อยู่บนสุด ---
-            # ต้องดึงข้อมูลเบื้องต้นก่อนเพื่อโชว์ราคาล่าสุด โดยยังไม่สน Timeframe
+            # ดึงข้อมูลเบื้องต้นเพื่อโชว์ราคา
             temp_stock = yf.Ticker(target_stock)
-            # ใช้ fast_info หรือ history ล่าสุด
-            temp_hist = temp_stock.history(period="2d") 
+            temp_hist = temp_stock.history(period="5d") # ดึง 5 วันกันพลาด
             
             if not temp_hist.empty:
                 curr_price = temp_hist['Close'].iloc[-1]
-                prev_price = temp_hist['Close'].iloc[-2] if len(temp_hist) > 1 else temp_hist['Open'].iloc[0]
+                # หา Previous Close ที่แท้จริง
+                if len(temp_hist) >= 2:
+                    prev_price = temp_hist['Close'].iloc[-2]
+                else:
+                    prev_price = temp_hist['Open'].iloc[0]
+
                 delta = curr_price - prev_price
                 pct = (delta / prev_price) * 100
                 
+                # พยายามดึงชื่อบริษัท (ถ้าไม่มีใช้ชื่อย่อ)
                 long_name = temp_stock.info.get('longName', target_stock)
                 st.caption(f"Company: {long_name}")
 
@@ -225,17 +236,17 @@ if target_stock:
             
             st.markdown("---")
 
-            # --- Timeframe Selector (Pills Style) ---
-            # นี่คือส่วนที่ปรับแก้ตามคำขอครับ ใช้ st.pills
+            # --- Timeframe Selector (Pills) ---
             col_pills, col_blank = st.columns([2, 1])
             with col_pills:
+                # ปุ่ม Timeframe แนวนอนตามที่ขอ
                 interval = st.pills("Timeframe:", ["1m", "5m", "15m", "30m", "1h", "1d", "1wk", "1mo"], default="5m")
 
-            # ดึงข้อมูลจริงตาม Timeframe ที่เลือก
+            # ดึงข้อมูลจริงตาม Timeframe
             hist, info = get_stock_data(target_stock, interval)
             
             if hist.empty:
-                st.error("❌ ไม่พบข้อมูลราคาตลาดสำหรับ Timeframe นี้")
+                st.error(f"❌ ไม่พบข้อมูลราคาตลาดสำหรับ Timeframe {interval}")
             else:
                 # --- Graph ---
                 fig = go.Figure()
