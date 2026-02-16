@@ -11,7 +11,7 @@ import requests
 # --- 1. การตั้งค่าหน้าเว็บ ---
 st.set_page_config(page_title="AI Multi-Portfolio Sniper Elite 🚀", layout="wide")
 
-# --- 2. การเชื่อมต่อ Google Sheets (ต้องตั้งค่า Secrets ให้ถูกต้อง) ---
+# --- 2. การเชื่อมต่อ Google Sheets (ต้องตั้งค่า Secrets แบบ TOML ให้ถูกต้อง) ---
 try:
     conn = st.connection("gsheets", type=GSheetsConnection)
 except Exception as e:
@@ -103,7 +103,7 @@ if target:
     hist = yf.Ticker(target).history(period=p_map[tf], interval=("1d" if tf in ["YTD","1Y","5Y"] else tf))
 
     if not hist.empty:
-        # กราฟ TradingView Style (ไม่มีช่องว่างกลางคืน/วันหยุด)
+        # กราฟ TradingView Style
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
         fig.add_trace(go.Candlestick(x=hist.index, open=hist['Open'], high=hist['High'], low=hist['Low'], close=hist['Close'], name="Price"), row=1, col=1)
         
@@ -120,38 +120,49 @@ if target:
         fig.update_layout(height=700, template="plotly_dark", xaxis_rangeslider_visible=False, hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
 
-    # --- 6. AI & News (Multi-Model Fallback) ---
+    # --- 6. AI & News (Ultimate Fallback Logic) ---
     st.divider()
     l_col, r_col = st.columns(2)
     with r_col:
         st.subheader("📰 Latest News")
         try:
             with DDGS() as ddgs:
-                results = list(ddgs.text(f"{target} stock news", max_results=5))
+                results = list(ddgs.text(f"{target} stock financial news", max_results=5))
                 news_txt = "\n".join([f"- [{n['title']}]({n['href']})" for n in results])
-                st.markdown(news_txt if results else "ไม่พบข่าว")
-        except: news_txt = "ไม่มีข้อมูลข่าว"
+                st.markdown(news_txt if results else "ไม่พบข่าวล่าสุด")
+        except: news_txt = "ไม่มีข้อมูลข่าวสารล่าสุด"
 
     with l_col:
-        st.subheader("🤖 AI Analysis")
+        st.subheader("🤖 AI Tactical Analysis")
         if st.button("🚀 Analyze Now", type="primary"):
             api_key = st.secrets.get("GEMINI_API_KEY")
             if api_key:
-                with st.spinner("AI กำลังค้นหาโมเดลที่ว่างอยู่..."):
-                    # ระบบไล่หาโมเดลที่ใช้งานได้
-                    models_to_try = ['gemini-2.0-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-pro']
+                with st.spinner("AI กำลังค้นหาโมเดลที่ใช้งานได้..."):
+                    # รายชื่อโมเดลทั้งหมดที่คุณส่งมา
+                    models_to_try = [
+                        'models/gemini-2.0-flash', 
+                        'models/gemini-2.0-flash-lite',
+                        'models/gemini-1.5-flash-latest', 
+                        'models/gemini-1.5-flash',
+                        'models/gemini-1.5-pro',
+                        'models/gemini-2.0-pro-exp-02-05' # เพิ่มตัวแรงสุดให้ด้วย
+                    ]
                     success = False
                     for m_name in models_to_try:
                         try:
                             genai.configure(api_key=api_key)
                             model = genai.GenerativeModel(m_name)
-                            prompt = f"วิเคราะห์หุ้น {target} ราคา ${curr_p:.2f} พอร์ต {selected_port} ข่าว: {news_txt} สรุปกลยุทธ์ภาษาไทย"
+                            prompt = f"ในฐานะเซียนหุ้น วิเคราะห์ {target} ราคา ${curr_p:.2f} พอร์ต {selected_port} ข่าว: {news_txt} สรุปกลยุทธ์ภาษาไทย"
                             res = model.generate_content(prompt)
-                            st.info(f"ใช้โมเดล: {m_name}")
+                            st.success(f"✅ สำเร็จด้วยโมเดล: {m_name}")
                             st.markdown(res.text)
                             success = True
-                            break
-                        except: continue
-                    if not success: st.error("❌ โควต้า AI เต็มทุกโมเดล กรุณารอ 1 นาที")
-            else: st.error("ไม่มี API Key")
-else: st.info("👈 เลือกหุ้นจากพอร์ตด้านซ้าย")
+                            break # ถ้าสำเร็จให้หยุดลูปทันที
+                        except Exception as e:
+                            # ถ้าติด Error ให้ข้ามไปลองโมเดลตัวถัดไป
+                            continue
+                    
+                    if not success: 
+                        st.error("❌ ทุกโมเดลติดโควต้าหรือเข้าถึงไม่ได้ในขณะนี้ กรุณารอ 1-2 นาทีแล้วลองใหม่")
+            else: st.error("ไม่พบ GEMINI_API_KEY ใน Secrets")
+else: st.info("👈 เลือกหุ้นจากพอร์ตด้านซ้ายเพื่อเริ่มต้น")
