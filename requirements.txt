@@ -4,3 +4,6 @@ google-generativeai
 plotly
 pandas
 duckduckgo-search
+lxml
+html5lib
+beautifulsoup4
