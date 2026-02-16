@@ -4,8 +4,7 @@ google-generativeai
 plotly
 pandas
 duckduckgo-search
+requests
 lxml
 html5lib
 beautifulsoup4
-lxml
-requests
