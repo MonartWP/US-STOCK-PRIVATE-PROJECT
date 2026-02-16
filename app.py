@@ -75,18 +75,24 @@ def get_stock_data(symbol):
 
 def get_latest_news(stock_obj):
     try:
+        # วิธีที่ 1: ดึงจาก news property ปกติ
         news_list = stock_obj.news
         formatted_news = []
-        if news_list:
-            for n in news_list[:5]: # ลองดึงเยอะขึ้นเผื่อบางอันไม่มี title
-                title = n.get('title') # ลองดึง title
-                publisher = n.get('publisher')
-                # เช็คว่ามี title จริงๆ ถึงจะเอามาโชว์
-                if title and publisher: 
-                    formatted_news.append(f"- {title} (Source: {publisher})")
         
-        # ถ้าไม่มีข่าวเลย ให้บอกว่าไม่พบ
-        return "\n".join(formatted_news) if formatted_news else "ไม่พบหัวข้อข่าวล่าสุด (Data Unavailable)"
+        # ถ้าวิธีที่ 1 ว่างเปล่า ลองวิธีสำรอง (Search) - *ส่วนนี้ yfinance บางเวอร์ชันอาจไม่มี แต่ลองใส่กันไว้*
+        
+        if news_list:
+            for n in news_list[:5]:
+                title = n.get('title')
+                publisher = n.get('publisher')
+                link = n.get('link') # ดึงลิ้งก์มาด้วยเผื่ออยากกดเข้าไปดู
+                if title:
+                    formatted_news.append(f"- [{title}]({link}) (Source: {publisher})")
+        
+        if not formatted_news:
+            return "ไม่พบข่าวใหม่ในขณะนี้ (Yahoo Finance อาจจำกัดการเข้าถึง)"
+            
+        return "\n".join(formatted_news)
     except Exception as e:
         return f"Error loading news: {str(e)}"
 
@@ -188,3 +194,4 @@ if selected_ticker:
     except Exception as e:
 
         st.error(f"เกิดข้อผิดพลาด: {e}")
+
