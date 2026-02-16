@@ -4,119 +4,136 @@ import google.generativeai as genai
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from streamlit_gsheets import GSheetsConnection
-from duckduckgo_search import DDGS
 import pandas as pd
 import requests
 
-# 1. Setup
-st.set_page_config(page_title="AI Stock Terminal Pro", layout="wide")
+# 1. Configuration
+st.set_page_config(page_title="AI Multi-Portfolio Terminal", layout="wide")
 
-# เชื่อมต่อ Google Sheets (ทำหน้าที่เป็น Profile เก็บข้อมูล)
+# เชื่อมต่อ Google Sheets
 conn = st.connection("gsheets", type=GSheetsConnection)
 
+@st.cache_data(ttl=86400)
 def get_sp500():
     try:
         url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
         res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
-        return dict(zip(pd.read_html(res.text)[0].Symbol, pd.read_html(res.text)[0].Security))
-    except: return {"AAPL": "Apple", "TSLA": "Tesla"}
+        df = pd.read_html(res.text)[0]
+        return dict(zip(df.Symbol, df.Security))
+    except: return {"AAPL": "Apple", "TSLA": "Tesla", "NVDA": "NVIDIA"}
 
 SP500 = get_sp500()
 
-# 2. Profile Logic (ดึง/เซฟ Watchlist ลง Sheets)
-def sync_watchlist(action, ticker=None):
-    # อ่านข้อมูลปัจจุบัน
+# 2. Portfolio Logic (ระบบดึงและเซฟแยกแผ่น)
+def sync_data(portfolio_name, action, ticker=None):
     try:
-        data = conn.read(worksheet="Sheet1", usecols=[0])
-        current_list = data.iloc[:, 0].tolist()
-    except: current_list = []
+        # อ่านข้อมูลจาก Sheet ที่ชื่อตามพอร์ต (Dime หรือ Webull)
+        df = conn.read(worksheet=portfolio_name, usecols=[0])
+        current_list = df.iloc[:, 0].dropna().tolist()
+    except:
+        current_list = []
 
-    if action == "add" and ticker not in current_list:
+    if action == "add" and ticker and ticker not in current_list:
         current_list.append(ticker)
+        new_df = pd.DataFrame(current_list, columns=["symbol"])
+        conn.update(worksheet=portfolio_name, data=new_df)
     elif action == "remove" and ticker in current_list:
         current_list.remove(ticker)
+        new_df = pd.DataFrame(current_list, columns=["symbol"])
+        conn.update(worksheet=portfolio_name, data=new_df)
     
-    # บันทึกกลับลง Sheets (Profile ของเรา)
-    new_df = pd.DataFrame(current_list, columns=["symbol"])
-    conn.update(worksheet="Sheet1", data=new_df)
     return current_list
 
-# โหลดข้อมูล Profile ตอนเริ่ม
-if 'watchlist' not in st.session_state:
-    try: st.session_state.watchlist = sync_watchlist("read")
-    except: st.session_state.watchlist = ["AAPL", "NVDA"]
-
-# 3. Sidebar Profile & Indicators
+# 3. Sidebar: Portfolio Selection & Settings
 with st.sidebar:
-    st.title("👤 My Profile")
-    st.info(f"Watchlist synced with Google Sheets")
+    st.title("🏦 My Portfolios")
+    
+    # เลือกพอร์ตที่จะดู
+    selected_port = st.selectbox("เลือกพอร์ตที่ต้องการ:", ["Dime", "Webull"])
+    
+    # โหลด Watchlist ตามพอร์ตที่เลือก
+    watchlist = sync_data(selected_port, "read")
     
     st.divider()
-    st.subheader("🛠️ Indicators")
+    st.subheader("📈 Indicator Settings")
     show_ema = st.toggle("เปิดเส้น EMA", value=True)
-    ema_vals = st.multiselect("เลือกช่วงเวลา EMA:", [20, 50, 100, 200], default=[20, 50])
+    ema_vals = st.multiselect("EMA Periods:", [20, 50, 100, 200], default=[20, 50])
     
     st.divider()
-    st.subheader("🔍 Add Stock")
-    new_s = st.selectbox("S&P 500:", [""] + [f"{k}-{v}" for k,v in SP500.items()])
-    if st.button("Add to Profile") and new_s:
-        ticker = new_s.split("-")[0]
-        st.session_state.watchlist = sync_watchlist("add", ticker)
+    st.subheader(f"➕ เพิ่มหุ้นใน {selected_port}")
+    new_stock = st.selectbox("เลือกจาก S&P 500:", [""] + [f"{k} - {v}" for k,v in SP500.items()])
+    if st.button("บันทึกลงพอร์ต") and new_stock:
+        symbol = new_stock.split(" - ")[0]
+        watchlist = sync_data(selected_port, "add", symbol)
+        st.rerun()
+        
+    custom_stock = st.text_input("หรือพิมพ์ชื่อหุ้นเอง (เช่น TSLA):").upper()
+    if st.button("เพิ่มหุ้น Custom") and custom_stock:
+        watchlist = sync_data(selected_port, "add", custom_stock)
         st.rerun()
 
     st.divider()
-    target = st.radio("เลือกหุ้นวิเคราะห์:", st.session_state.watchlist)
-    if st.button("🗑️ ลบจาก Profile"):
-        st.session_state.watchlist = sync_watchlist("remove", target)
-        st.rerun()
+    if watchlist:
+        target = st.radio(f"หุ้นใน {selected_port}:", watchlist)
+        if st.button("🗑️ ลบหุ้นนี้ออก"):
+            sync_data(selected_port, "remove", target)
+            st.rerun()
+    else:
+        target = None
+        st.info("พอร์ตนี้ยังไม่มีหุ้น กรุณาเพิ่มหุ้นครับ")
 
-# 4. Dashboard Core
+# 4. Main Terminal
 if target:
-    st.title(f"🚀 {target} Terminal")
+    st.title(f"🚀 {target} @ {selected_port} Portfolio")
     
-    # Timeframe Pills
-    tf = st.pills("Timeframe:", ["1m", "5m", "15m", "1h", "1d", "1wk", "YTD", "1Y", "5Y"], default="1h")
+    # Timeframe
+    tf = st.pills("ช่วงเวลา:", ["1m", "5m", "15m", "1h", "1d", "1wk", "YTD", "1Y", "5Y"], default="1h")
     
-    # Fetch Data
+    # Data Fetching
     p_map = {"1m":"1d","5m":"5d","15m":"1mo","1h":"3mo","1d":"1y","1wk":"2y","YTD":"ytd","1Y":"1y","5Y":"5y"}
-    interval = "1d" if tf in ["YTD", "1Y", "5Y"] else tf
-    hist = yf.Ticker(target).history(period=p_map[tf], interval=interval)
+    actual_i = "1d" if tf in ["YTD", "1Y", "5Y"] else tf
+    hist = yf.Ticker(target).history(period=p_map[tf], interval=actual_i)
 
     if not hist.empty:
-        # กราฟราคา + Volume แบบ TradingView
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
+        # กราฟราคาแบบ TradingView (Subplots)
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
         
-        # Candlestick
+        # แท่งเทียน
         fig.add_trace(go.Candlestick(x=hist.index, open=hist['Open'], high=hist['High'], low=hist['Low'], close=hist['Close'], name="Price"), row=1, col=1)
         
-        # EMA (Dynamic)
+        # EMA
         if show_ema:
-            colors = ['blue', 'orange', 'red', 'green']
-            for i, val in enumerate(ema_vals):
-                ema = hist['Close'].ewm(span=val).mean()
-                fig.add_trace(go.Scatter(x=hist.index, y=ema, name=f"EMA {val}", line=dict(width=1, color=colors[i%4])), row=1, col=1)
+            colors = ['#2962FF', '#FF9800', '#F44336', '#4CAF50']
+            for i, v in enumerate(ema_vals):
+                ema = hist['Close'].ewm(span=v).mean()
+                fig.add_trace(go.Scatter(x=hist.index, y=ema, name=f"EMA {v}", line=dict(width=1.2, color=colors[i%4])), row=1, col=1)
 
         # Volume
-        fig.add_trace(go.Bar(x=hist.index, y=hist['Volume'], name="Volume", opacity=0.3), row=2, col=1)
+        v_colors = ['#26a69a' if c >= o else '#ef5350' for o, c in zip(hist['Open'], hist['Close'])]
+        fig.add_trace(go.Bar(x=hist.index, y=hist['Volume'], name="Volume", marker_color=v_colors, opacity=0.5), row=2, col=1)
 
-        # ตัดช่องว่างตลาดปิด (TradingView Style)
-        fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"]), dict(bounds=[16, 9.5], pattern="hour") if "m" in tf or "h" in tf else None])
-        fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False)
+        # ตัดช่วงตลาดปิด (TradingView Style)
+        fig.update_xaxes(rangebreaks=[
+            dict(bounds=["sat", "mon"]), 
+            dict(bounds=[16, 9.5], pattern="hour") if "m" in tf or "h" in tf else None
+        ])
+        
+        fig.update_layout(height=700, template="plotly_dark", xaxis_rangeslider_visible=False, hovermode="x unified")
         st.plotly_chart(fig, use_container_width=True)
 
-    # 5. AI Analyst (มีระบบกัน Error 429)
+    # AI Analysis Section
     st.divider()
-    if st.button("⚡ Run AI Strategic Analysis", type="primary"):
+    if st.button("⚡ วิเคราะห์กลยุทธ์ด้วย AI", type="primary"):
         api_key = st.secrets.get("GEMINI_API_KEY")
-        if not api_key: st.error("ไม่พบ API Key")
+        if not api_key:
+            st.error("กรุณาใส่ API Key ใน Settings")
         else:
             try:
                 genai.configure(api_key=api_key)
                 model = genai.GenerativeModel('models/gemini-2.0-flash')
-                res = model.generate_content(f"Analyze {target}. Current: {hist['Close'].iloc[-1]}. Output Thai.")
-                st.write(res.text)
+                curr_p = hist['Close'].iloc[-1]
+                prompt = f"ในฐานะเซียนหุ้น วิเคราะห์หุ้น {target} ราคาปัจจุบัน ${curr_p:.2f} สำหรับพอร์ต {selected_port} โดยให้คำแนะนำตามเทคนิค EMA และสถานะตลาดปัจจุบัน ออกมาเป็นภาษาไทย"
+                response = model.generate_content(prompt)
+                st.markdown(response.text)
             except Exception as e:
-                if "429" in str(e): st.warning("⚠️ โควต้า AI รายนาทีหมดครับ รอ 1 นาทีแล้วกดใหม่นะ")
-                else: st.error(f"Error: {e}")
-
-else: st.info("เพิ่มหุ้นลง Profile ที่แถบด้านซ้ายได้เลยครับ")
+                st.error(f"AI Error: {e}")
