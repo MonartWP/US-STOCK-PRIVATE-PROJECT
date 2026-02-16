@@ -103,7 +103,7 @@ def ai_analyze(news_text, current_price, symbol):
     
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-pro')
+        model = genai.GenerativeModel('models/gemini-2.5-flash')
         
         prompt = f"""
         Role: คุณคือนักวิเคราะห์หุ้น Wall Street มืออาชีพ ที่เก่งเรื่อง Technical และ Fundamental
@@ -194,4 +194,5 @@ if selected_ticker:
     except Exception as e:
 
         st.error(f"เกิดข้อผิดพลาด: {e}")
+
 
