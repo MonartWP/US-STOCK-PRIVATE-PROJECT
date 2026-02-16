@@ -14,6 +14,7 @@ st.set_page_config(
     layout="wide"
 )
 
+# Custom CSS เพื่อปรับแต่งปุ่มให้ดูเหมือน Trading Platform
 st.markdown("""
 <style>
     .stButton>button {
@@ -21,34 +22,33 @@ st.markdown("""
         border-radius: 8px;
         font-weight: bold;
     }
-    /* ปรับแต่ง Table ให้สวยงาม */
-    .stDataFrame { border-radius: 10px; overflow: hidden; }
+    /* ปรับแต่งปุ่ม Pills ให้ดูดี */
+    div[data-testid="stPills"] {
+        gap: 10px;
+        justify-content: center;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
 # 2. Advanced Data Fetching (Auto-List)
 # ---------------------------------------------------------
-
-@st.cache_data(ttl=86400) # Cache ไว้ 24 ชม. ไม่ต้องโหลดใหม่บ่อยๆ
+@st.cache_data(ttl=86400)
 def get_sp500_tickers():
     """ดูดรายชื่อหุ้น S&P 500 ทั้งหมดจาก Wikipedia อัตโนมัติ"""
     try:
         url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
         tables = pd.read_html(url)
         df = tables[0]
-        # สร้าง Dictionary {SYMBOL: Name}
         tickers = dict(zip(df.Symbol, df.Security))
         return tickers
     except Exception as e:
-        # ถ้าเว็บล่ม ให้ใช้รายชื่อสำรอง
         return {
             "AAPL": "Apple Inc.", "TSLA": "Tesla, Inc.", "NVDA": "NVIDIA Corp.",
             "AMD": "Advanced Micro Devices", "MSFT": "Microsoft Corp.",
             "GOOGL": "Alphabet Inc.", "AMZN": "Amazon.com", "META": "Meta Platforms"
         }
 
-# โหลดรายชื่อหุ้นรอไว้เลย
 SP500_TICKERS = get_sp500_tickers()
 
 # ---------------------------------------------------------
@@ -66,9 +66,10 @@ if 'news_cache' not in st.session_state:
 # ---------------------------------------------------------
 def get_stock_data(symbol, interval):
     """ดึงข้อมูลราคา + ปรับ Period อัตโนมัติ"""
+    # Mapping ให้ฉลาดขึ้นตาม Interval ที่เลือก
     period_map = {
         "1m": "1d", "5m": "5d", "15m": "1mo", 
-        "30m": "1mo", "1h": "3mo", "1d": "1y", "1wk": "2y"
+        "30m": "1mo", "1h": "3mo", "1d": "1y", "1wk": "2y", "1mo": "5y"
     }
     period = period_map.get(interval, "1mo")
     
@@ -85,7 +86,6 @@ def get_latest_news(symbol):
     try:
         formatted_news = []
         with DDGS() as ddgs:
-            # ค้นหาเจาะจงข่าว Finance
             results = list(ddgs.text(f"{symbol} stock financial news", max_results=5))
             if results:
                 for news in results:
@@ -110,7 +110,6 @@ def ai_analyze(news_text, current_price, symbol, api_key):
     
     try:
         genai.configure(api_key=api_key)
-        # ใช้รุ่น Flash เพื่อความไว (ถ้ามีสิทธิ์ใช้ 2.5 ก็จะใช้ได้)
         model = genai.GenerativeModel('models/gemini-2.5-flash') 
         
         prompt = f"""
@@ -132,12 +131,11 @@ def ai_analyze(news_text, current_price, symbol, api_key):
         return f"AI Error: {str(e)}"
 
 # ---------------------------------------------------------
-# 5. Sidebar UI (The Control Center)
+# 5. Sidebar UI
 # ---------------------------------------------------------
 with st.sidebar:
     st.title("⚙️ Control Panel")
     
-    # API Key
     if "GEMINI_API_KEY" in st.secrets:
         api_key = st.secrets["GEMINI_API_KEY"]
         st.success("✅ Connected to System Key")
@@ -149,12 +147,9 @@ with st.sidebar:
     # --- ส่วนค้นหาหุ้นแบบ Hybrid ---
     st.subheader("🔍 เพิ่มหุ้นลง Watchlist")
     
-    # Tab 1: เลือกจาก S&P 500 (Dropdown)
-    # Tab 2: พิมพ์เอง (Manual)
     tab1, tab2 = st.tabs(["List S&P500", "Custom Search"])
     
     with tab1:
-        # แปลง Dict ให้เป็น List สวยๆ สำหรับ Search
         sp500_options = [f"{sym} - {name}" for sym, name in SP500_TICKERS.items()]
         selected_sp500 = st.selectbox("เลือกหุ้น S&P 500:", [""] + sp500_options)
         
@@ -169,10 +164,9 @@ with st.sidebar:
         custom_ticker = st.text_input("พิมพ์ชื่อย่อหุ้น (เช่น PLTR, COIN):").upper()
         if st.button("➕ เพิ่มหุ้น Custom"):
             if custom_ticker and custom_ticker not in st.session_state.watchlist:
-                # ลองเช็คก่อนว่าหุ้นมีจริงไหม
                 check = yf.Ticker(custom_ticker)
                 try:
-                    if check.info: # ถ้าดึง info ได้แปลว่ามีจริง
+                    if check.info:
                         st.session_state.watchlist.append(custom_ticker)
                         st.rerun()
                 except:
@@ -184,8 +178,6 @@ with st.sidebar:
     st.subheader("👀 My Watchlist")
     
     if st.session_state.watchlist:
-        # ใช้ Multiselect เพื่อให้ดูรายการทั้งหมดง่ายๆ
-        # แต่เวลาเลือกดูใช้ Radio หรือ Selectbox แยก
         target_stock = st.radio("เลือกหุ้นที่ต้องการวิเคราะห์:", st.session_state.watchlist)
         
         col_del, col_clr = st.columns(2)
@@ -207,46 +199,44 @@ with st.sidebar:
 if target_stock:
     # Header
     st.title(f"🚀 {target_stock} Analysis Dashboard")
-    
-    # Timeframe Selector
-    c_time, c_blank = st.columns([2, 5])
-    with c_time:
-        time_option = st.selectbox("⏳ Timeframe:", 
-            ["1 Minute", "5 Minutes", "15 Minutes", "30 Minutes", "1 Hour", "1 Day", "1 Week"], index=1)
-    
-    # Map selection to interval
-    interval_mapping = {
-        "1 Minute": "1m", "5 Minutes": "5m", "15 Minutes": "15m", 
-        "30 Minutes": "30m", "1 Hour": "1h", "1 Day": "1d", "1 Week": "1wk"
-    }
-    interval = interval_mapping[time_option]
 
     with st.spinner(f"Fetching {target_stock} data..."):
         try:
-            hist, info = get_stock_data(target_stock, interval)
+            # --- ส่วน Metrics (ราคา) อยู่บนสุด ---
+            # ต้องดึงข้อมูลเบื้องต้นก่อนเพื่อโชว์ราคาล่าสุด โดยยังไม่สน Timeframe
+            temp_stock = yf.Ticker(target_stock)
+            # ใช้ fast_info หรือ history ล่าสุด
+            temp_hist = temp_stock.history(period="2d") 
             
-            if hist.empty:
-                st.error("❌ ไม่พบข้อมูลราคาตลาด (Market Closed or Invalid Data)")
-            else:
-                # --- Price Banner ---
-                curr_price = hist['Close'].iloc[-1]
-                try:
-                    prev_price = hist['Open'].iloc[0] # เทียบกับราคาเปิดของช่วงนั้น
-                    delta = curr_price - prev_price
-                    pct = (delta / prev_price) * 100
-                except:
-                    delta, pct = 0, 0
+            if not temp_hist.empty:
+                curr_price = temp_hist['Close'].iloc[-1]
+                prev_price = temp_hist['Close'].iloc[-2] if len(temp_hist) > 1 else temp_hist['Open'].iloc[0]
+                delta = curr_price - prev_price
+                pct = (delta / prev_price) * 100
                 
-                # แสดงชื่อเต็มบริษัท
-                long_name = info.get('longName', target_stock)
+                long_name = temp_stock.info.get('longName', target_stock)
                 st.caption(f"Company: {long_name}")
 
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Price", f"${curr_price:.2f}", f"{delta:.2f} ({pct:.2f}%)")
-                m2.metric("High", f"${hist['High'].max():.2f}")
-                m3.metric("Low", f"${hist['Low'].min():.2f}")
-                m4.metric("Volume", f"{hist['Volume'].sum():,}")
+                m2.metric("Previous Close", f"${prev_price:.2f}")
+                m3.metric("Day High", f"${temp_hist['High'].iloc[-1]:.2f}")
+                m4.metric("Day Low", f"${temp_hist['Low'].iloc[-1]:.2f}")
+            
+            st.markdown("---")
 
+            # --- Timeframe Selector (Pills Style) ---
+            # นี่คือส่วนที่ปรับแก้ตามคำขอครับ ใช้ st.pills
+            col_pills, col_blank = st.columns([2, 1])
+            with col_pills:
+                interval = st.pills("Timeframe:", ["1m", "5m", "15m", "30m", "1h", "1d", "1wk", "1mo"], default="5m")
+
+            # ดึงข้อมูลจริงตาม Timeframe ที่เลือก
+            hist, info = get_stock_data(target_stock, interval)
+            
+            if hist.empty:
+                st.error("❌ ไม่พบข้อมูลราคาตลาดสำหรับ Timeframe นี้")
+            else:
                 # --- Graph ---
                 fig = go.Figure()
                 fig.add_trace(go.Candlestick(
@@ -256,8 +246,8 @@ if target_stock:
                     name='Price'
                 ))
                 fig.update_layout(
-                    title=f'{target_stock} ({time_option})',
-                    height=550,
+                    title=f'{target_stock} Chart ({interval})',
+                    height=600,
                     template="plotly_dark",
                     xaxis_rangeslider_visible=False,
                     margin=dict(t=30, b=0, l=0, r=0)
@@ -267,7 +257,6 @@ if target_stock:
                 # --- AI & News Section ---
                 st.markdown("---")
                 
-                # Auto-fetch news
                 news_content = get_latest_news(target_stock)
                 
                 c_left, c_right = st.columns([1, 1])
@@ -282,7 +271,6 @@ if target_stock:
                 with c_left:
                     st.subheader("🤖 AI Analyst Insight")
                     
-                    # Caching Check
                     cached_result = st.session_state.analysis_cache.get(target_stock)
                     
                     if cached_result:
