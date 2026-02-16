@@ -4,6 +4,7 @@ import google.generativeai as genai
 import plotly.graph_objects as go
 import pandas as pd
 from datetime import datetime
+from duckduckgo_search import DDGS
 
 # ---------------------------------------------------------
 # 1. ตั้งค่าหน้าเว็บ (Page Config)
@@ -73,28 +74,31 @@ def get_stock_data(symbol):
     info = stock.info
     return history, info, stock
 
-def get_latest_news(stock_obj):
+def get_latest_news(symbol):
+    """ดึงข่าวด่วนโดยใช้ DuckDuckGo Search (แก้ปัญหา Yahoo ไม่ส่งค่า)"""
     try:
-        # วิธีที่ 1: ดึงจาก news property ปกติ
-        news_list = stock_obj.news
         formatted_news = []
-        
-        # ถ้าวิธีที่ 1 ว่างเปล่า ลองวิธีสำรอง (Search) - *ส่วนนี้ yfinance บางเวอร์ชันอาจไม่มี แต่ลองใส่กันไว้*
-        
-        if news_list:
-            for n in news_list[:5]:
-                title = n.get('title')
-                publisher = n.get('publisher')
-                link = n.get('link') # ดึงลิ้งก์มาด้วยเผื่ออยากกดเข้าไปดู
-                if title:
-                    formatted_news.append(f"- [{title}]({link}) (Source: {publisher})")
-        
+        # ค้นหาข่าวภาษาอังกฤษ (จะได้ผลลัพธ์เยอะกว่า)
+        with DDGS() as ddgs:
+            # ค้นหาด้วย keywords: ชื่อหุ้น + stock news
+            results = list(ddgs.text(f"{symbol} stock news", max_results=5))
+            
+            if results:
+                for news in results:
+                    title = news.get('title')
+                    link = news.get('href')
+                    source = news.get('body') # ใช้เนื้อหาข่าวสั้นๆ เป็น source แทน
+                    
+                    if title and link:
+                        formatted_news.append(f"- [{title}]({link})")
+            
         if not formatted_news:
-            return "ไม่พบข่าวใหม่ในขณะนี้ (Yahoo Finance อาจจำกัดการเข้าถึง)"
+            return "ไม่พบข่าวใหม่ในขณะนี้ (No recent news found)"
             
         return "\n".join(formatted_news)
+        
     except Exception as e:
-        return f"Error loading news: {str(e)}"
+        return f"Error searching news: {str(e)}"
 
 def ai_analyze(news_text, current_price, symbol):
     """ให้ AI วิเคราะห์ข่าวและกราฟ"""
@@ -194,5 +198,6 @@ if selected_ticker:
     except Exception as e:
 
         st.error(f"เกิดข้อผิดพลาด: {e}")
+
 
 
