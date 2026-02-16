@@ -7,3 +7,5 @@ duckduckgo-search
 lxml
 html5lib
 beautifulsoup4
+lxml
+requests
