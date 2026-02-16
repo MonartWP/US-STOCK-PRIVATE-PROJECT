@@ -60,6 +60,7 @@ def get_sp500_tickers():
             "AMD": "Advanced Micro Devices", "MSFT": "Microsoft Corp.",
             "GOOGL": "Alphabet Inc.", "AMZN": "Amazon.com", "META": "Meta Platforms"
         }
+SP500_TICKERS = get_sp500_tickers()
 
 # ---------------------------------------------------------
 # 3. Session State Management
@@ -310,4 +311,5 @@ if target_stock:
             st.error(f"System Error: {str(e)}")
 else:
     st.info("👈 กรุณาเลือกหุ้นจากเมนูด้านซ้ายเพื่อเริ่มต้น")
+
 
