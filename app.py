@@ -2,8 +2,6 @@ import streamlit as st
 import yfinance as yf
 import google.generativeai as genai
 import plotly.graph_objects as go
-import pandas as pd
-from datetime import datetime
 from duckduckgo_search import DDGS
 
 # ---------------------------------------------------------
@@ -12,18 +10,12 @@ from duckduckgo_search import DDGS
 st.set_page_config(
     page_title="AI Stock Sniper Pro 📈",
     page_icon="🤖",
-    layout="wide"  # ใช้พื้นที่เต็มจอ
+    layout="wide"
 )
 
-# Custom CSS ให้ดูโปรขึ้น
+# Custom CSS
 st.markdown("""
 <style>
-    .metric-container {
-        background-color: #1E1E1E;
-        padding: 15px;
-        border-radius: 10px;
-        border: 1px solid #333;
-    }
     .stButton>button {
         width: 100%;
         border-radius: 5px;
@@ -37,28 +29,25 @@ st.markdown("""
 with st.sidebar:
     st.header("⚙️ Control Panel")
     
-    # เช็คว่ามี Key ซ่อนอยู่ในระบบ (Secrets) หรือไม่
+    # เช็ค API Key
     if "GEMINI_API_KEY" in st.secrets:
         api_key = st.secrets["GEMINI_API_KEY"]
         st.success("✅ เชื่อมต่อ API Key จากระบบสำเร็จ")
     else:
-        # ถ้าไม่มี Key ในระบบ (เช่น รันในเครื่องตัวเอง) ให้โชว์ช่องกรอก
         api_key = st.text_input("🔑 ใส่ Gemini API Key ตรงนี้:", type="password")
     
     st.markdown("---")
     st.subheader("👀 My Watchlist")
     
-    # ระบบ Watchlist (เก็บค่าไว้ใน Session)
     if 'watchlist' not in st.session_state:
         st.session_state.watchlist = ['AAPL', 'TSLA', 'NVDA', 'AMD']
     
     new_ticker = st.text_input("เพิ่มหุ้น (เช่น MSFT):").upper()
-    if st.button("Add to Watchlist"):
+    if st.button("Add"):
         if new_ticker and new_ticker not in st.session_state.watchlist:
             st.session_state.watchlist.append(new_ticker)
 
-    # แสดงรายการหุ้นใน Watchlist
-    selected_ticker = st.radio("เลือกหุ้นที่ต้องการดู:", st.session_state.watchlist)
+    selected_ticker = st.radio("เลือกหุ้น:", st.session_state.watchlist)
     
     if st.button("Clear Watchlist"):
         st.session_state.watchlist = []
@@ -69,26 +58,22 @@ with st.sidebar:
 def get_stock_data(symbol):
     """ดึงข้อมูลราคาและประวัติ"""
     stock = yf.Ticker(symbol)
-    # ดึงราคาย้อนหลัง 1 วัน (กราฟรายนาที) เพื่อความ Real-time
     history = stock.history(period="1d", interval="5m")
     info = stock.info
-    return history, info, stock
+    return history, info
 
 def get_latest_news(symbol):
-    """ดึงข่าวด่วนโดยใช้ DuckDuckGo Search (แก้ปัญหา Yahoo ไม่ส่งค่า)"""
+    """ดึงข่าวด่วนโดยใช้ DuckDuckGo Search"""
     try:
         formatted_news = []
-        # ค้นหาข่าวภาษาอังกฤษ (จะได้ผลลัพธ์เยอะกว่า)
         with DDGS() as ddgs:
-            # ค้นหาด้วย keywords: ชื่อหุ้น + stock news
+            # ค้นหาข่าว 5 อันดับแรก
             results = list(ddgs.text(f"{symbol} stock news", max_results=5))
             
             if results:
                 for news in results:
                     title = news.get('title')
                     link = news.get('href')
-                    source = news.get('body') # ใช้เนื้อหาข่าวสั้นๆ เป็น source แทน
-                    
                     if title and link:
                         formatted_news.append(f"- [{title}]({link})")
             
@@ -106,22 +91,23 @@ def ai_analyze(news_text, current_price, symbol):
         return "⚠️ กรุณาใส่ API Key ในแถบด้านซ้ายก่อนครับ"
     
     try:
+        # ใช้ Model 2.5 Flash ตามที่คุณมีสิทธิ์
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('models/gemini-2.5-flash')
         
         prompt = f"""
-        Role: คุณคือนักวิเคราะห์หุ้น Wall Street มืออาชีพ ที่เก่งเรื่อง Technical และ Fundamental
+        Role: คุณคือนักวิเคราะห์หุ้น Wall Street มืออาชีพ
         Task: วิเคราะห์หุ้น {symbol} ที่ราคาปัจจุบัน ${current_price:.2f}
         
         News Context:
-        {news_list}
+        {news_text}
         
         Output Requirement (ตอบเป็นภาษาไทย สั้น กระชับ):
-        1. 📰 **สรุปข่าว:** (สรุปประเด็นสำคัญใน 1 บรรทัด)
+        1. 📰 **สรุปข่าว:** (สรุปประเด็นสำคัญ)
         2. 🚦 **Sentiment:** (Bullish/Bearish/Neutral)
         3. 🎯 **Impact:** (ผลกระทบระยะสั้น: บวก/ลบ)
-        4. 🛡️ **Support/Resistance:** (ประเมินแนวรับแนวต้านจิตวิทยา จากราคาปัจจุบัน)
-        5. 💡 **Action:** (แนะนำ: Wait & See / Buy on Dip / Panic Sell)
+        4. 🛡️ **Support/Resistance:** (ประเมินแนวรับแนวต้าน)
+        5. 💡 **Action:** (แนะนำ: Wait / Buy / Sell)
         """
         response = model.generate_content(prompt)
         return response.text
@@ -134,70 +120,52 @@ def ai_analyze(news_text, current_price, symbol):
 st.title(f"🚀 AI Stock Analysis: {selected_ticker}")
 
 if selected_ticker:
-    # ดึงข้อมูล
     try:
-        df, info, stock_obj = get_stock_data(selected_ticker)
+        df, info = get_stock_data(selected_ticker)
         
         if df.empty:
             st.error("ไม่พบข้อมูลหุ้น หรือตลาดปิด")
         else:
-            # ส่วนแสดงราคา (Header Metrics)
+            # ส่วนแสดงราคา
             current_price = info.get('currentPrice', df['Close'].iloc[-1])
             previous_close = info.get('previousClose', df['Open'].iloc[0])
             delta = current_price - previous_close
             delta_percent = (delta / previous_close) * 100
             
             col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric(label="Current Price", value=f"${current_price:.2f}", delta=f"{delta:.2f} ({delta_percent:.2f}%)")
-            with col2:
-                st.metric(label="Day High", value=f"${df['High'].max():.2f}")
-            with col3:
-                st.metric(label="Day Low", value=f"${df['Low'].min():.2f}")
+            col1.metric("Current Price", f"${current_price:.2f}", f"{delta:.2f} ({delta_percent:.2f}%)")
+            col2.metric("Day High", f"${df['High'].max():.2f}")
+            col3.metric("Day Low", f"${df['Low'].min():.2f}")
 
-            # -----------------------------------------------------
-            # ส่วนกราฟ (Interactive Chart)
-            # -----------------------------------------------------
+            # กราฟ
             fig = go.Figure(data=[go.Candlestick(x=df.index,
-                            open=df['Open'],
-                            high=df['High'],
-                            low=df['Low'],
-                            close=df['Close'])])
+                            open=df['Open'], high=df['High'],
+                            low=df['Low'], close=df['Close'])])
             
-            fig.update_layout(title=f'{selected_ticker} Real-time Chart (5m Interval)',
+            fig.update_layout(title=f'{selected_ticker} Real-time Chart',
                               yaxis_title='Price (USD)',
-                              xaxis_rangeslider_visible=False,
-                              template="plotly_dark") # ใช้ธีมมืดให้ดูโปร
+                              template="plotly_dark",
+                              height=500)
             st.plotly_chart(fig, use_container_width=True)
 
-            # -----------------------------------------------------
-            # ส่วน AI Analysis & News
-            # -----------------------------------------------------
+            # ส่วน AI และข่าว
             st.markdown("---")
             col_ai, col_news = st.columns([1, 1])
-
-            news_list = get_latest_news(stock_obj)
+            
+            # ดึงข่าว (แก้เป็นส่งชื่อหุ้นตรงๆ)
+            news_list = get_latest_news(selected_ticker)
 
             with col_ai:
                 st.subheader("🤖 AI Analyst Insight")
-                if st.button("⚡ กดเพื่อให้ AI วิเคราะห์เดี๋ยวนี้"):
-                    with st.spinner('AI กำลังอ่านข่าวและดูกราฟ...'):
-                        analysis_result = ai_analyze(news_list, current_price, selected_ticker)
-                        st.success("วิเคราะห์เสร็จสิ้น!")
-                        st.markdown(analysis_result)
-                else:
-                    st.info("กดปุ่มเพื่อเริ่มการวิเคราะห์ (ประหยัดโควต้า API)")
+                if st.button("⚡ วิเคราะห์เดี๋ยวนี้"):
+                    with st.spinner('AI กำลังทำงาน...'):
+                        result = ai_analyze(news_list, current_price, selected_ticker)
+                        st.success("เรียบร้อย!")
+                        st.markdown(result)
 
             with col_news:
-                st.subheader("📰 Latest News Headlines")
-                if news_list:
-                    st.text_area("หัวข้อข่าวล่าสุด", news_list, height=200)
-                else:
-                    st.write("ไม่มีข่าวด่วนในช่วงนี้")
+                st.subheader("📰 ข่าวล่าสุด")
+                st.info(news_list)
 
     except Exception as e:
-
         st.error(f"เกิดข้อผิดพลาด: {e}")
-
-
-
