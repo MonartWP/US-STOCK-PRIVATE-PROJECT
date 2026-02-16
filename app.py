@@ -4,6 +4,7 @@ import google.generativeai as genai
 import plotly.graph_objects as go
 from duckduckgo_search import DDGS
 import pandas as pd
+import requests
 
 # ---------------------------------------------------------
 # 1. Configuration & Setup
@@ -35,21 +36,30 @@ st.markdown("""
 # ---------------------------------------------------------
 @st.cache_data(ttl=86400)
 def get_sp500_tickers():
-    """ดูดรายชื่อหุ้น S&P 500 ทั้งหมดจาก Wikipedia"""
+    """ดูดรายชื่อหุ้น S&P 500 แบบปลอมตัวเป็น Browser"""
     try:
         url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-        tables = pd.read_html(url)
+        # ปลอมตัวเป็น Chrome เพื่อไม่ให้ Wikipedia บล็อก
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        
+        # ใช้ requests ดึงข้อมูลมาก่อน
+        response = requests.get(url, headers=headers)
+        
+        # ให้ pandas อ่านจากเนื้อหาที่ดึงมา
+        tables = pd.read_html(response.text)
         df = tables[0]
+        
         tickers = dict(zip(df.Symbol, df.Security))
         return tickers
+        
     except Exception as e:
         return {
             "AAPL": "Apple Inc.", "TSLA": "Tesla, Inc.", "NVDA": "NVIDIA Corp.",
             "AMD": "Advanced Micro Devices", "MSFT": "Microsoft Corp.",
-            "GOOGL": "Alphabet Inc."
+            "GOOGL": "Alphabet Inc.", "AMZN": "Amazon.com", "META": "Meta Platforms"
         }
-
-SP500_TICKERS = get_sp500_tickers()
 
 # ---------------------------------------------------------
 # 3. Session State Management
@@ -300,3 +310,4 @@ if target_stock:
             st.error(f"System Error: {str(e)}")
 else:
     st.info("👈 กรุณาเลือกหุ้นจากเมนูด้านซ้ายเพื่อเริ่มต้น")
+
