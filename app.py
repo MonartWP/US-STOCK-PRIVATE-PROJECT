@@ -7,19 +7,25 @@ from streamlit_gsheets import GSheetsConnection
 from duckduckgo_search import DDGS
 import pandas as pd
 import requests
-import re
+import datetime
 import time
 
-# --- 1. ตั้งค่าหน้าเว็บ ---
+# --- 1. ตั้งค่าหน้าเว็บ & Session State ---
 st.set_page_config(page_title="Port to TheMoon Commander 🚀", layout="wide")
 st.markdown("""
 <style>
     .stMetric { background-color: #1E1E1E; border: 1px solid #333; border-radius: 10px; padding: 10px; }
     div[data-testid="stExpander"] { background-color: #262730; border-radius: 10px; }
-    /* ปรับแต่ง Progress Bar ให้สวยขึ้น */
-    div[data-testid="stProgressBar"] > div { border-radius: 10px; }
 </style>
 """, unsafe_allow_html=True)
+
+# เริ่มต้นตัวแปรความจำ (เพื่อให้ผล AI ไม่หายเวลากดปุ่มอื่น)
+if 'ai_sentiment_result' not in st.session_state:
+    st.session_state.ai_sentiment_result = None
+if 'ai_tactical_result' not in st.session_state:
+    st.session_state.ai_tactical_result = None
+if 'news_cache' not in st.session_state:
+    st.session_state.news_cache = ""
 
 # --- 2. เชื่อมต่อ Google Sheets ---
 try:
@@ -27,7 +33,7 @@ try:
 except Exception as e:
     st.error(f"❌ Connection Error: {e}")
 
-# --- 3. เตรียมข้อมูล S&P 500 ---
+# --- 3. ฟังก์ชันและ Helper ---
 @st.cache_data(ttl=86400)
 def get_sp500():
     try:
@@ -40,252 +46,260 @@ def get_sp500():
 
 SP500 = get_sp500()
 
-# --- 4. ฟังก์ชันจัดการข้อมูล (Sheet Logic) ---
 def clean_symbol(sym):
-    # แปลง "NASDAQ:RKLB" -> "RKLB"
     if isinstance(sym, str):
-        parts = sym.split(":")
-        return parts[-1].strip()
+        return sym.split(":")[-1].strip()
     return str(sym)
 
 def get_sheet_data(tab_name):
     try:
         df = conn.read(worksheet=tab_name, ttl=0)
-        # Mapping Col: A=Symbol(0), C=Qty(2), D=Cost(3), K=Notes(10)
-        # ตรวจสอบว่ามีคอลัมน์ครบไหม
-        if len(df.columns) > 10:
+        # ตรวจสอบจำนวนคอลัมน์ (ต้องมีอย่างน้อย 11 เพื่อดึง Note ใน col K)
+        if len(df.columns) >= 10: 
+            # Col: A=0, C=2, D=3, K=10
             needed_cols = df.iloc[:, [0, 2, 3, 10]].copy()
             needed_cols.columns = ['raw_symbol', 'qty', 'cost', 'note']
-            
-            # Cleaning
             needed_cols['symbol'] = needed_cols['raw_symbol'].apply(clean_symbol)
             needed_cols['qty'] = pd.to_numeric(needed_cols['qty'], errors='coerce').fillna(0.0)
             needed_cols['cost'] = pd.to_numeric(needed_cols['cost'], errors='coerce').fillna(0.0)
             needed_cols['note'] = needed_cols['note'].fillna("")
-            
             return needed_cols[needed_cols['symbol'] != ""]
-        else:
-            st.error("Format ไฟล์ Sheet ไม่ตรง (ต้องการอย่างน้อย 11 คอลัมน์)")
-            return pd.DataFrame()
-    except Exception as e:
+        return pd.DataFrame()
+    except:
         return pd.DataFrame(columns=['symbol', 'qty', 'cost', 'note'])
 
 def update_specific_cell(tab_name, symbol, cost=None, qty=None, note=None):
     try:
         sh = conn.client.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
         wks = sh.worksheet(tab_name)
-        cell = wks.find(symbol, in_column=1) # หาในคอลัมน์ A
-        
+        cell = wks.find(symbol, in_column=1)
         if cell:
             row = cell.row
-            if qty is not None: wks.update_cell(row, 3, qty)   # Col C
-            if cost is not None: wks.update_cell(row, 4, cost) # Col D
-            if note is not None: wks.update_cell(row, 11, note) # Col K
-            st.toast(f"💾 บันทึก {symbol} แล้ว", icon="✅")
+            if qty is not None: wks.update_cell(row, 3, qty)
+            if cost is not None: wks.update_cell(row, 4, cost)
+            if note is not None: wks.update_cell(row, 11, note)
+            st.toast(f"💾 อัปเดต {symbol} แล้ว", icon="✅")
         else:
-            st.warning("⚠️ หุ้นนี้ยังไม่มีใน Sheet! (ระบบเพิ่มให้ต่อท้าย)")
             new_row = [symbol, "", qty or 0, cost or 0] + [""]*6 + [note or ""]
             wks.append_row(new_row)
             st.toast(f"✨ เพิ่ม {symbol} ใหม่", icon="🆕")
-        return True
     except Exception as e:
         st.error(f"Update Error: {e}")
-        return False
 
-# --- 5. Sidebar ---
+def add_transaction(date, broker, symbol, action, qty, price, fees, ex_rate, total_thb, total_amt, note):
+    try:
+        sh = conn.client.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
+        wks = sh.worksheet("TRANSACTIONS") # ต้องชื่อ Tab นี้เป๊ะๆ
+        # เรียงลำดับข้อมูลตาม Column ในรูปภาพที่คุณส่งมา (A-K)
+        row_data = [
+            str(date),      # A: Date
+            broker,         # B: Broker
+            symbol,         # C: Symbol
+            action,         # D: Action
+            qty,            # E: Quantity
+            price,          # F: Price
+            fees,           # G: Fees
+            ex_rate,        # H: Exchange Rate
+            total_thb,      # I: Total Paid (THB)
+            total_amt,      # J: Total Amount
+            note            # K: Note
+        ]
+        wks.append_row(row_data)
+        st.success(f"✅ บันทึกรายการ {action} {symbol} เรียบร้อย!")
+        time.sleep(1)
+        st.rerun()
+    except Exception as e:
+        st.error(f"Transaction Error: {e}")
+
+# --- 4. Sidebar Main Menu ---
 with st.sidebar:
     st.title("🌕 Commander")
-    port_map = {"Dime": "PORTFOLIO(DIME)", "Webull": "PORTFOLIO(WEBULL)"}
-    selected_key = st.selectbox("เลือกพอร์ต:", list(port_map.keys()))
-    selected_tab = port_map[selected_key]
-    
-    df_port = get_sheet_data(selected_tab)
-    watchlist = df_port['symbol'].tolist() if not df_port.empty else []
-    
+    page = st.radio("เมนูหลัก", ["📊 Portfolio Analysis", "📝 Transaction Logger"])
     st.divider()
-    
-    # เพิ่มหุ้น
-    with st.expander("➕ เพิ่ม/แก้ไข หุ้น"):
-        input_stock = st.text_input("ชื่อหุ้น (เช่น NVDA):").upper().strip()
-        c1, c2 = st.columns(2)
-        u_cost = c1.number_input("ทุนเฉลี่ย ($):", value=0.0)
-        u_qty = c2.number_input("จำนวนหุ้น:", value=0.0)
+
+# ==========================================
+# PAGE 1: PORTFOLIO ANALYSIS
+# ==========================================
+if page == "📊 Portfolio Analysis":
+    with st.sidebar:
+        port_map = {"Dime": "PORTFOLIO(DIME)", "Webull": "PORTFOLIO(WEBULL)"}
+        selected_key = st.selectbox("เลือกพอร์ตดูข้อมูล:", list(port_map.keys()))
+        selected_tab = port_map[selected_key]
         
-        if st.button("บันทึกลง Sheet") and input_stock:
-            update_specific_cell(selected_tab, input_stock, cost=u_cost, qty=u_qty)
-            st.rerun()
-
-    st.divider()
-    if watchlist:
-        target_symbol = st.radio("รายการหุ้น:", watchlist)
-    else:
-        target_symbol = None
-        st.info("ไม่พบข้อมูลหุ้นใน Tab นี้")
-
-# --- 6. Main Dashboard ---
-if target_symbol:
-    row_data = df_port[df_port['symbol'] == target_symbol].iloc[0]
-    my_cost = float(row_data['cost'])
-    my_qty = float(row_data['qty'])
-    my_note = str(row_data['note'])
-    real_sheet_symbol = row_data['raw_symbol']
-
-    st.title(f"🚀 {target_symbol} Analysis")
-    st.caption(f"Source: {selected_tab} | Original: {real_sheet_symbol}")
-
-    # 6.1 ข้อมูลตลาด & P/L
-    raw = yf.Ticker(target_symbol).history(period="5d")
-    if not raw.empty:
-        curr_p = raw['Close'].iloc[-1]
-        change = curr_p - raw['Close'].iloc[-2]
-        pct = (change / raw['Close'].iloc[-2]) * 100
+        df_port = get_sheet_data(selected_tab)
+        watchlist = df_port['symbol'].tolist() if not df_port.empty else []
         
-        mkt_val = curr_p * my_qty
-        tot_cost = my_cost * my_qty
-        unrealized = mkt_val - tot_cost
-        pl_pct = (unrealized / tot_cost * 100) if tot_cost > 0 else 0
-        
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("ราคาตลาด", f"${curr_p:.2f}", f"{pct:.2f}%")
-        c2.metric("มูลค่าพอร์ต", f"${mkt_val:,.2f}")
-        c3.metric("ต้นทุนรวม", f"${tot_cost:,.2f}")
-        c4.metric("กำไร/ขาดทุน", f"${unrealized:,.2f}", f"{pl_pct:.2f}%", delta_color="normal")
+        if watchlist:
+            target_symbol = st.radio("หุ้นในพอร์ต:", watchlist)
+        else:
+            target_symbol = None
+            st.info("ไม่พบหุ้น")
 
-    # 6.2 Journal
-    with st.expander(f"📝 Trading Journal ({target_symbol})", expanded=False):
-        col_input, col_note = st.columns([1, 2])
-        with col_input:
-            new_cost = st.number_input("แก้ต้นทุน ($):", value=my_cost, format="%.4f")
-            new_qty = st.number_input("แก้จำนวนหุ้น:", value=my_qty, format="%.4f")
-        with col_note:
-            new_note = st.text_area("Note:", value=my_note, height=100)
-        if st.button("💾 อัปเดตข้อมูล"):
-            update_specific_cell(selected_tab, real_sheet_symbol, cost=new_cost, qty=new_qty, note=new_note)
-            st.rerun()
+    if target_symbol:
+        # ล้างค่า AI เก่าทิ้ง ถ้าเปลี่ยนหุ้น
+        if 'last_symbol' not in st.session_state or st.session_state.last_symbol != target_symbol:
+            st.session_state.ai_sentiment_result = None
+            st.session_state.ai_tactical_result = None
+            st.session_state.news_cache = ""
+            st.session_state.last_symbol = target_symbol
 
-    # 6.3 กราฟ (แก้บั๊กกราฟว่าง)
-    tf = st.pills("Timeframe:", ["1m", "5m", "15m", "1h", "1d", "1wk"], default="1d")
-    p_map = {"1m":"1d","5m":"5d","15m":"1mo","1h":"3mo","1d":"1y","1wk":"2y"}
-    
-    # ดึงข้อมูล
-    hist = yf.Ticker(target_symbol).history(period=p_map.get(tf,"1y"), interval=tf)
-    
-    if not hist.empty:
-        # **จุดสำคัญ**: ลบ Timezone ออก เพื่อแก้ปัญหากราฟ Plotly เพี้ยน
-        hist.index = hist.index.tz_localize(None) 
-        
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
-        fig.add_trace(go.Candlestick(x=hist.index, open=hist['Open'], high=hist['High'], low=hist['Low'], close=hist['Close'], name="Price"), row=1, col=1)
-        
-        # EMA
-        ema20 = hist['Close'].ewm(span=20).mean()
-        ema50 = hist['Close'].ewm(span=50).mean()
-        fig.add_trace(go.Scatter(x=hist.index, y=ema20, name="EMA 20", line=dict(color='orange', width=1)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=hist.index, y=ema50, name="EMA 50", line=dict(color='blue', width=1)), row=1, col=1)
-        
-        # Volume
-        v_colors = ['#26a69a' if c >= o else '#ef5350' for o, c in zip(hist['Open'], hist['Close'])]
-        fig.add_trace(go.Bar(x=hist.index, y=hist['Volume'], marker_color=v_colors), row=2, col=1)
+        row_data = df_port[df_port['symbol'] == target_symbol].iloc[0]
+        curr_qty = float(row_data['qty'])
+        curr_cost = float(row_data['cost'])
+        curr_note = str(row_data['note'])
+        real_sym = row_data['raw_symbol']
 
-        # ตั้งค่า Rangebreaks (ซ่อนวันหยุด) เฉพาะ timeframe ที่ไม่ใช่ Intraday (1m, 5m) จะได้ไม่บั๊ก
-        if tf not in ['1m', '5m', '15m', '1h']:
-            fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+        st.title(f"🚀 {target_symbol} Analysis")
+        
+        # --- Market Data & Chart ---
+        raw = yf.Ticker(target_symbol).history(period="5d")
+        if not raw.empty:
+            curr_p = raw['Close'].iloc[-1]
+            chg = curr_p - raw['Close'].iloc[-2]
+            pct = (chg / raw['Close'].iloc[-2]) * 100
             
-        fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False)
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.warning(f"ไม่พบข้อมูลกราฟสำหรับ {target_symbol} (อาจเป็นเพราะชื่อหุ้นผิด หรือตลาดปิด)")
+            mkt_val = curr_p * curr_qty
+            tot_cost = curr_cost * curr_qty
+            unrealized = mkt_val - tot_cost
+            pl_pct = (unrealized / tot_cost * 100) if tot_cost > 0 else 0
+            
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Price", f"${curr_p:.2f}", f"{pct:.2f}%")
+            c2.metric("Market Value", f"${mkt_val:,.2f}")
+            c3.metric("Total Cost", f"${tot_cost:,.2f}")
+            c4.metric("P/L", f"${unrealized:,.2f}", f"{pl_pct:.2f}%", delta_color="normal")
 
-    # 6.4 ข่าว & AI Scoring (เพิ่มกลับมาแล้ว!)
-    st.divider()
-    c_news, c_score = st.columns([1, 1])
-    
-    news_text_for_ai = "" # ตัวแปรเก็บเนื้อหาข่าวส่งให้ AI
-    
-    with c_news:
-        st.subheader("📰 ข่าวล่าสุด")
-        try:
-            with DDGS() as ddgs:
-                results = list(ddgs.text(f"{target_symbol} stock financial news", max_results=5))
-                if results:
-                    for n in results:
-                        st.markdown(f"**[{n['title']}]({n['href']})**")
-                        news_text_for_ai += f"- {n['title']}\n"
-                else:
-                    st.info("ไม่พบข่าวล่าสุดในช่วงนี้")
-                    news_text_for_ai = "No specific news found."
-        except:
-            st.error("ไม่สามารถดึงข้อมูลข่าวได้")
-            news_text_for_ai = "News fetch error."
+            # Chart
+            hist = yf.Ticker(target_symbol).history(period="1y")
+            if not hist.empty:
+                hist.index = hist.index.tz_localize(None)
+                fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7,0.3])
+                fig.add_trace(go.Candlestick(x=hist.index, open=hist['Open'], high=hist['High'], low=hist['Low'], close=hist['Close'], name="Price"), row=1, col=1)
+                fig.add_trace(go.Scatter(x=hist.index, y=hist['Close'].ewm(span=20).mean(), name="EMA20", line=dict(color='orange')), row=1, col=1)
+                fig.add_trace(go.Bar(x=hist.index, y=hist['Volume'], name="Vol"), row=2, col=1)
+                fig.update_layout(height=500, template="plotly_dark", xaxis_rangeslider_visible=False)
+                st.plotly_chart(fig, use_container_width=True)
 
-    # ส่วนคะแนนข่าว (AI Score)
-    with c_score:
-        st.subheader("🔥 AI Sentiment Score")
-        if st.button("ประเมินอารมณ์ตลาด", type="primary"):
-            api_key = st.secrets.get("GEMINI_API_KEY")
-            if api_key:
-                with st.spinner("AI กำลังอ่านข่าวและให้คะแนน..."):
-                    try:
-                        genai.configure(api_key=api_key)
-                        model = genai.GenerativeModel('models/gemini-2.0-flash') # ใช้ตัวเร็ว
-                        
-                        prompt = f"""
-                        Analyze headlines for {target_symbol}:
-                        {news_text_for_ai}
-                        
-                        Task:
-                        1. Score 0 (Bearish) to 100 (Bullish).
-                        2. Summarize driver in Thai.
-                        
-                        Output format:
-                        SCORE: [Number]
-                        SUMMARY: [Text]
-                        """
-                        res = model.generate_content(prompt)
-                        text = res.text
-                        
-                        # ดึงคะแนน
-                        import re
-                        match = re.search(r"SCORE: (\d+)", text)
-                        score = int(match.group(1)) if match else 50
-                        
-                        # แสดง Gauge Bar
-                        st.metric("Sentiment Score", f"{score}/100", delta=score-50)
-                        st.progress(score)
-                        
-                        if score >= 70: st.success("ตลาดกระทิง (Bullish) 🐂")
-                        elif score <= 30: st.error("ตลาดหมี (Bearish) 🐻")
-                        else: st.warning("ตลาดไซด์เวย์ (Neutral) ⚖️")
-                        
-                        summary = text.split("SUMMARY:")[-1].strip()
-                        st.info(f"**สรุป:** {summary}")
-                        
-                    except Exception as e:
-                        st.error(f"AI Error: {e}")
+        # --- AI Section (Unified) ---
+        st.divider()
+        col_news, col_ai = st.columns([1, 1])
+        
+        with col_news:
+            st.subheader("📰 ข่าวล่าสุด")
+            # โหลดข่าวแค่ครั้งเดียวแล้วจำไว้
+            if not st.session_state.news_cache:
+                try:
+                    with DDGS() as ddgs:
+                        results = list(ddgs.text(f"{target_symbol} stock news", max_results=5))
+                        if results:
+                            txt = ""
+                            for n in results:
+                                st.markdown(f"- [{n['title']}]({n['href']})")
+                                txt += f"- {n['title']}\n"
+                            st.session_state.news_cache = txt
+                        else:
+                            st.session_state.news_cache = "No news found."
+                            st.info("ไม่พบข่าว")
+                except:
+                    st.session_state.news_cache = "News Error"
             else:
-                st.error("No API Key")
+                # แสดงข่าวจาก Cache (ถ้ามี) แบบ Link
+                # (ในที่นี้แสดงแบบ Text เพื่อความง่าย หรือคุณจะ parse กลับมาก็ได้)
+                st.info("ข่าวโหลดแล้ว (พร้อมสำหรับ AI)")
 
-    # 6.5 AI Analysis เต็มรูปแบบ
-    st.divider()
-    st.subheader("🤖 Deep Tactical Analysis")
-    if st.button("วิเคราะห์กลยุทธ์เชิงลึก"):
-        api_key = st.secrets.get("GEMINI_API_KEY")
-        if api_key:
-            with st.spinner("กำลังสแกน..."):
-                models = ['models/gemini-2.5-flash', 'models/gemini-2.0-flash', 'models/gemini-1.5-pro']
-                success = False
-                for m in models:
-                    try:
-                        genai.configure(api_key=api_key)
-                        model = genai.GenerativeModel(m)
-                        prompt = f"หุ้น {target_symbol} ราคา ${curr_p} ข่าว: {news_text_for_ai}. วิเคราะห์แนวโน้มกราฟและแนะนำกลยุทธ์ (ไทย)"
-                        res = model.generate_content(prompt)
-                        st.success(f"Analysis by {m}")
-                        st.markdown(res.text)
-                        success = True
-                        break
-                    except: continue
-                if not success: st.error("AI Busy.")
+        with col_ai:
+            st.subheader("🤖 Intelligence Center")
+            
+            # ปุ่มกดวิเคราะห์ (แยกกันแต่อยู่ด้วยกัน)
+            c_btn1, c_btn2 = st.columns(2)
+            if c_btn1.button("🔥 Sentiment Score", use_container_width=True):
+                api_key = st.secrets.get("GEMINI_API_KEY")
+                if api_key:
+                    with st.spinner("Giving Score..."):
+                        try:
+                            genai.configure(api_key=api_key)
+                            model = genai.GenerativeModel('models/gemini-2.0-flash')
+                            prompt = f"Analyze news for {target_symbol}: {st.session_state.news_cache}. Give Score 0-100 (0=Bear,100=Bull). Format: SCORE: 80"
+                            res = model.generate_content(prompt)
+                            # จำใส่ Session State
+                            st.session_state.ai_sentiment_result = res.text
+                        except Exception as e: st.error(str(e))
 
-else:
-    st.info("👈 เลือกหุ้นจากเมนูซ้ายมือ")
+            if c_btn2.button("🧠 Deep Tactics", use_container_width=True):
+                api_key = st.secrets.get("GEMINI_API_KEY")
+                if api_key:
+                    with st.spinner("Analyzing..."):
+                        try:
+                            genai.configure(api_key=api_key)
+                            model = genai.GenerativeModel('models/gemini-2.0-flash')
+                            prompt = f"Analyze {target_symbol} price ${curr_p}. News: {st.session_state.news_cache}. Short tactical advice (Thai)."
+                            res = model.generate_content(prompt)
+                            # จำใส่ Session State
+                            st.session_state.ai_tactical_result = res.text
+                        except Exception as e: st.error(str(e))
+
+            # --- ส่วนแสดงผล (Display Results form Session State) ---
+            # 1. Sentiment Result
+            if st.session_state.ai_sentiment_result:
+                st.markdown("---")
+                text = st.session_state.ai_sentiment_result
+                import re
+                match = re.search(r"SCORE: (\d+)", text)
+                score = int(match.group(1)) if match else 50
+                st.metric("AI Score", f"{score}/100", delta=score-50)
+                st.progress(score)
+                if score >= 70: st.success("Bullish 🐂")
+                elif score <= 30: st.error("Bearish 🐻")
+                else: st.warning("Neutral ⚖️")
+
+            # 2. Tactical Result
+            if st.session_state.ai_tactical_result:
+                st.markdown("---")
+                st.caption("Strategic Advice")
+                st.markdown(st.session_state.ai_tactical_result)
+
+    else:
+        st.info("เลือกหุ้นจาก Sidebar")
+
+# ==========================================
+# PAGE 2: TRANSACTION LOGGER (New Feature)
+# ==========================================
+elif page == "📝 Transaction Logger":
+    st.header("บันทึกธุรกรรม (Transactions)")
+    st.info("ข้อมูลจะถูกบันทึกลงใน Tab: **TRANSACTIONS** ใน Google Sheets")
+
+    with st.form("trans_form"):
+        c1, c2, c3 = st.columns(3)
+        date = c1.date_input("Date", datetime.date.today())
+        broker = c2.selectbox("Broker", ["Dime!", "Webull", "InnovestX", "Streaming"])
+        action = c3.selectbox("Action", ["Buy", "Sell", "Dividend"])
+        
+        c4, c5 = st.columns(2)
+        symbol = c4.text_input("Symbol (e.g. NVDA, NASDAQ:RKLB)").upper().strip()
+        exchange_rate = c5.number_input("Exchange Rate (THB/USD)", value=34.50)
+        
+        st.divider()
+        c6, c7, c8 = st.columns(3)
+        qty = c6.number_input("Quantity", value=0.0, format="%.6f")
+        price = c7.number_input("Price ($)", value=0.0, format="%.4f")
+        fees = c8.number_input("Fees ($)", value=0.0, format="%.2f")
+        
+        # คำนวณยอดรวมให้อัตโนมัติ (Visual Only)
+        total_amt_usd = (qty * price) + fees
+        total_thb_est = total_amt_usd * exchange_rate
+        note = st.text_area("Note / Reason")
+        
+        st.markdown(f"**ยอดรวมโดยประมาณ:** ${total_amt_usd:,.2f} (~฿{total_thb_est:,.2f})")
+        
+        submitted = st.form_submit_button("💾 บันทึก Transaction", type="primary")
+        
+        if submitted:
+            if symbol and qty > 0 and price > 0:
+                # เรียกฟังก์ชันบันทึก
+                add_transaction(
+                    date, broker, symbol, action, 
+                    qty, price, fees, exchange_rate, 
+                    total_thb_est, total_amt_usd, note
+                )
+            else:
+                st.error("กรุณากรอก Symbol, Quantity และ Price ให้ครบถ้วน")
