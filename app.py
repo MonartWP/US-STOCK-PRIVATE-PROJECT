@@ -9,8 +9,9 @@ import pandas as pd
 import requests
 import datetime
 import time
+import re
 
-# --- 1. ตั้งค่าหน้าเว็บ & Session State ---
+# --- 1. ตั้งค่าหน้าเว็บ & ความจำระบบ (Session State) ---
 st.set_page_config(page_title="Port to TheMoon Commander 🚀", layout="wide")
 st.markdown("""
 <style>
@@ -19,21 +20,47 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# เริ่มต้นตัวแปรความจำ (เพื่อให้ผล AI ไม่หายเวลากดปุ่มอื่น)
+# เริ่มต้นตัวแปรความจำ (เพื่อให้ค่าไม่หายเวลากดปุ่มอื่น)
 if 'ai_sentiment_result' not in st.session_state:
     st.session_state.ai_sentiment_result = None
 if 'ai_tactical_result' not in st.session_state:
     st.session_state.ai_tactical_result = None
 if 'news_cache' not in st.session_state:
     st.session_state.news_cache = ""
+if 'last_symbol' not in st.session_state:
+    st.session_state.last_symbol = ""
 
-# --- 2. เชื่อมต่อ Google Sheets ---
+# --- 2. ฟังก์ชันเรียก AI แบบอึด (Auto-Retry & Fallback) ---
+def call_ai_smart(prompt, api_key):
+    """ฟังก์ชันนี้จะไล่ลองโมเดลทีละตัว จนกว่าจะเจอตัวที่ว่าง"""
+    # รายชื่อโมเดล เรียงจาก ใหม่ -> เก่า -> กันเหนียว
+    models_to_try = [
+        'models/gemini-2.5-flash', 
+        'models/gemini-2.0-flash', 
+        'models/gemini-1.5-flash',
+        'models/gemini-1.5-pro'
+    ]
+    
+    for model_name in models_to_try:
+        try:
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            return response.text # ถ้าสำเร็จ ส่งคำตอบกลับเลย
+        except Exception as e:
+            # ถ้าพัง (เช่น 429 quota) ให้ข้ามไปตัวถัดไปเงียบๆ
+            time.sleep(1) # พัก 1 วิ ก่อนลองตัวใหม่
+            continue
+            
+    return "Error: โควต้าเต็มทุกโมเดล กรุณารอ 1 นาที"
+
+# --- 3. เชื่อมต่อ Google Sheets ---
 try:
     conn = st.connection("gsheets", type=GSheetsConnection)
 except Exception as e:
     st.error(f"❌ Connection Error: {e}")
 
-# --- 3. ฟังก์ชันและ Helper ---
+# --- 4. ฟังก์ชันจัดการข้อมูล ---
 @st.cache_data(ttl=86400)
 def get_sp500():
     try:
@@ -47,16 +74,13 @@ def get_sp500():
 SP500 = get_sp500()
 
 def clean_symbol(sym):
-    if isinstance(sym, str):
-        return sym.split(":")[-1].strip()
+    if isinstance(sym, str): return sym.split(":")[-1].strip()
     return str(sym)
 
 def get_sheet_data(tab_name):
     try:
         df = conn.read(worksheet=tab_name, ttl=0)
-        # ตรวจสอบจำนวนคอลัมน์ (ต้องมีอย่างน้อย 11 เพื่อดึง Note ใน col K)
         if len(df.columns) >= 10: 
-            # Col: A=0, C=2, D=3, K=10
             needed_cols = df.iloc[:, [0, 2, 3, 10]].copy()
             needed_cols.columns = ['raw_symbol', 'qty', 'cost', 'note']
             needed_cols['symbol'] = needed_cols['raw_symbol'].apply(clean_symbol)
@@ -89,29 +113,17 @@ def update_specific_cell(tab_name, symbol, cost=None, qty=None, note=None):
 def add_transaction(date, broker, symbol, action, qty, price, fees, ex_rate, total_thb, total_amt, note):
     try:
         sh = conn.client.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"])
-        wks = sh.worksheet("TRANSACTIONS") # ต้องชื่อ Tab นี้เป๊ะๆ
-        # เรียงลำดับข้อมูลตาม Column ในรูปภาพที่คุณส่งมา (A-K)
-        row_data = [
-            str(date),      # A: Date
-            broker,         # B: Broker
-            symbol,         # C: Symbol
-            action,         # D: Action
-            qty,            # E: Quantity
-            price,          # F: Price
-            fees,           # G: Fees
-            ex_rate,        # H: Exchange Rate
-            total_thb,      # I: Total Paid (THB)
-            total_amt,      # J: Total Amount
-            note            # K: Note
-        ]
+        wks = sh.worksheet("TRANSACTIONS")
+        # เรียงตามคอลัมน์ A-K
+        row_data = [str(date), broker, symbol, action, qty, price, fees, ex_rate, total_thb, total_amt, note]
         wks.append_row(row_data)
-        st.success(f"✅ บันทึกรายการ {action} {symbol} เรียบร้อย!")
+        st.success(f"✅ บันทึกรายการ {action} {symbol} ลง Sheet เรียบร้อย!")
         time.sleep(1)
         st.rerun()
     except Exception as e:
         st.error(f"Transaction Error: {e}")
 
-# --- 4. Sidebar Main Menu ---
+# --- 5. เมนูหลัก (Sidebar) ---
 with st.sidebar:
     st.title("🌕 Commander")
     page = st.radio("เมนูหลัก", ["📊 Portfolio Analysis", "📝 Transaction Logger"])
@@ -136,8 +148,8 @@ if page == "📊 Portfolio Analysis":
             st.info("ไม่พบหุ้น")
 
     if target_symbol:
-        # ล้างค่า AI เก่าทิ้ง ถ้าเปลี่ยนหุ้น
-        if 'last_symbol' not in st.session_state or st.session_state.last_symbol != target_symbol:
+        # รีเซ็ตค่า AI ถ้าเปลี่ยนหุ้น
+        if st.session_state.last_symbol != target_symbol:
             st.session_state.ai_sentiment_result = None
             st.session_state.ai_tactical_result = None
             st.session_state.news_cache = ""
@@ -169,7 +181,7 @@ if page == "📊 Portfolio Analysis":
             c3.metric("Total Cost", f"${tot_cost:,.2f}")
             c4.metric("P/L", f"${unrealized:,.2f}", f"{pl_pct:.2f}%", delta_color="normal")
 
-            # Chart
+            # Chart (Fixed Timezone)
             hist = yf.Ticker(target_symbol).history(period="1y")
             if not hist.empty:
                 hist.index = hist.index.tz_localize(None)
@@ -180,13 +192,12 @@ if page == "📊 Portfolio Analysis":
                 fig.update_layout(height=500, template="plotly_dark", xaxis_rangeslider_visible=False)
                 st.plotly_chart(fig, use_container_width=True)
 
-        # --- AI Section (Unified) ---
+        # --- AI Section ---
         st.divider()
         col_news, col_ai = st.columns([1, 1])
         
         with col_news:
             st.subheader("📰 ข่าวล่าสุด")
-            # โหลดข่าวแค่ครั้งเดียวแล้วจำไว้
             if not st.session_state.news_cache:
                 try:
                     with DDGS() as ddgs:
@@ -203,56 +214,46 @@ if page == "📊 Portfolio Analysis":
                 except:
                     st.session_state.news_cache = "News Error"
             else:
-                # แสดงข่าวจาก Cache (ถ้ามี) แบบ Link
-                # (ในที่นี้แสดงแบบ Text เพื่อความง่าย หรือคุณจะ parse กลับมาก็ได้)
                 st.info("ข่าวโหลดแล้ว (พร้อมสำหรับ AI)")
 
         with col_ai:
             st.subheader("🤖 Intelligence Center")
             
-            # ปุ่มกดวิเคราะห์ (แยกกันแต่อยู่ด้วยกัน)
             c_btn1, c_btn2 = st.columns(2)
+            
+            # ปุ่ม 1: Sentiment Score
             if c_btn1.button("🔥 Sentiment Score", use_container_width=True):
                 api_key = st.secrets.get("GEMINI_API_KEY")
                 if api_key:
-                    with st.spinner("Giving Score..."):
-                        try:
-                            genai.configure(api_key=api_key)
-                            model = genai.GenerativeModel('models/gemini-2.0-flash')
-                            prompt = f"Analyze news for {target_symbol}: {st.session_state.news_cache}. Give Score 0-100 (0=Bear,100=Bull). Format: SCORE: 80"
-                            res = model.generate_content(prompt)
-                            # จำใส่ Session State
-                            st.session_state.ai_sentiment_result = res.text
-                        except Exception as e: st.error(str(e))
+                    with st.spinner("AI กำลังอ่านข่าว..."):
+                        prompt = f"Analyze news for {target_symbol}: {st.session_state.news_cache}. Give Score 0-100 (0=Bear,100=Bull). Format: SCORE: 80"
+                        res = call_ai_smart(prompt, api_key) # ใช้ฟังก์ชันฉลาด
+                        st.session_state.ai_sentiment_result = res
 
+            # ปุ่ม 2: Deep Tactics
             if c_btn2.button("🧠 Deep Tactics", use_container_width=True):
                 api_key = st.secrets.get("GEMINI_API_KEY")
                 if api_key:
-                    with st.spinner("Analyzing..."):
-                        try:
-                            genai.configure(api_key=api_key)
-                            model = genai.GenerativeModel('models/gemini-2.0-flash')
-                            prompt = f"Analyze {target_symbol} price ${curr_p}. News: {st.session_state.news_cache}. Short tactical advice (Thai)."
-                            res = model.generate_content(prompt)
-                            # จำใส่ Session State
-                            st.session_state.ai_tactical_result = res.text
-                        except Exception as e: st.error(str(e))
+                    with st.spinner("AI กำลังวิเคราะห์กราฟ..."):
+                        prompt = f"Analyze {target_symbol} price ${curr_p}. News: {st.session_state.news_cache}. Short tactical advice (Thai)."
+                        res = call_ai_smart(prompt, api_key) # ใช้ฟังก์ชันฉลาด
+                        st.session_state.ai_tactical_result = res
 
-            # --- ส่วนแสดงผล (Display Results form Session State) ---
-            # 1. Sentiment Result
+            # แสดงผล (จะไม่หายแม้กดปุ่มอื่น)
             if st.session_state.ai_sentiment_result:
                 st.markdown("---")
                 text = st.session_state.ai_sentiment_result
-                import re
-                match = re.search(r"SCORE: (\d+)", text)
-                score = int(match.group(1)) if match else 50
-                st.metric("AI Score", f"{score}/100", delta=score-50)
-                st.progress(score)
-                if score >= 70: st.success("Bullish 🐂")
-                elif score <= 30: st.error("Bearish 🐻")
-                else: st.warning("Neutral ⚖️")
+                if "Error" in text:
+                    st.error(text)
+                else:
+                    match = re.search(r"SCORE: (\d+)", text)
+                    score = int(match.group(1)) if match else 50
+                    st.metric("AI Score", f"{score}/100", delta=score-50)
+                    st.progress(score)
+                    if score >= 70: st.success("Bullish 🐂")
+                    elif score <= 30: st.error("Bearish 🐻")
+                    else: st.warning("Neutral ⚖️")
 
-            # 2. Tactical Result
             if st.session_state.ai_tactical_result:
                 st.markdown("---")
                 st.caption("Strategic Advice")
@@ -262,11 +263,11 @@ if page == "📊 Portfolio Analysis":
         st.info("เลือกหุ้นจาก Sidebar")
 
 # ==========================================
-# PAGE 2: TRANSACTION LOGGER (New Feature)
+# PAGE 2: TRANSACTION LOGGER
 # ==========================================
 elif page == "📝 Transaction Logger":
     st.header("บันทึกธุรกรรม (Transactions)")
-    st.info("ข้อมูลจะถูกบันทึกลงใน Tab: **TRANSACTIONS** ใน Google Sheets")
+    st.info("ข้อมูลจะถูกบันทึกลงใน Tab: **TRANSACTIONS** ต่อท้ายรายการล่าสุด")
 
     with st.form("trans_form"):
         c1, c2, c3 = st.columns(3)
@@ -284,22 +285,16 @@ elif page == "📝 Transaction Logger":
         price = c7.number_input("Price ($)", value=0.0, format="%.4f")
         fees = c8.number_input("Fees ($)", value=0.0, format="%.2f")
         
-        # คำนวณยอดรวมให้อัตโนมัติ (Visual Only)
         total_amt_usd = (qty * price) + fees
         total_thb_est = total_amt_usd * exchange_rate
         note = st.text_area("Note / Reason")
         
-        st.markdown(f"**ยอดรวมโดยประมาณ:** ${total_amt_usd:,.2f} (~฿{total_thb_est:,.2f})")
+        st.markdown(f"**ยอดรวม:** ${total_amt_usd:,.2f} (~฿{total_thb_est:,.2f})")
         
         submitted = st.form_submit_button("💾 บันทึก Transaction", type="primary")
         
         if submitted:
             if symbol and qty > 0 and price > 0:
-                # เรียกฟังก์ชันบันทึก
-                add_transaction(
-                    date, broker, symbol, action, 
-                    qty, price, fees, exchange_rate, 
-                    total_thb_est, total_amt_usd, note
-                )
+                add_transaction(date, broker, symbol, action, qty, price, fees, exchange_rate, total_thb_est, total_amt_usd, note)
             else:
-                st.error("กรุณากรอก Symbol, Quantity และ Price ให้ครบถ้วน")
+                st.error("กรุณากรอกข้อมูลให้ครบ (Symbol, Qty, Price)")
